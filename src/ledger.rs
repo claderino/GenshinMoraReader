@@ -500,42 +500,148 @@ pub fn print_summary(rows: &[SummaryRow], title: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Export configuration
+// ---------------------------------------------------------------------------
+
+/// User-configurable export formatting, persisted as `export.json` next to
+/// the ledger files. Controls CSV/clipboard output for both the GUI and CLI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ExportConfig {
+    /// Timestamp format: any chrono strftime string (e.g. `%Y-%m-%d %H:%M:%S`)
+    /// or the special value `excel` for raw Excel serial numbers
+    /// (days since 1899-12-30, fractional = time of day).
+    pub datetime_format: String,
+    /// Reason label → custom string (e.g. "Monster kill" → "Enemy").
+    /// Unmapped labels are exported as-is.
+    pub reason_map: std::collections::BTreeMap<String, String>,
+    /// Ordered export columns. Available: timestamp, date, type, action,
+    /// amount, remaining, balance, balance_after, uid, description, source.
+    pub columns: Vec<String>,
+    /// Whether to include a header row.
+    pub include_header: bool,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            datetime_format: "%Y-%m-%d %H:%M:%S".into(),
+            reason_map: Default::default(),
+            columns: ["timestamp", "uid", "action", "amount", "balance_after", "source"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            include_header: true,
+        }
+    }
+}
+
+impl ExportConfig {
+    pub fn load(dir: &Path) -> Self {
+        std::fs::read_to_string(dir.join("export.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(dir.join("export.json"), json)?;
+        Ok(())
+    }
+
+    pub fn format_ts(&self, ms: i64) -> String {
+        if self.datetime_format.eq_ignore_ascii_case("excel") {
+            // Excel serials encode local civil time: take the local wall
+            // clock and interpret it directly as the day fraction (a naive
+            // UTC reading of the local time), so the sheet shows the time
+            // the player actually experienced.
+            return chrono::DateTime::from_timestamp_millis(ms)
+                .map(|d| {
+                    let local_wall = d.with_timezone(&Local).naive_local();
+                    let wall_ms = local_wall.and_utc().timestamp_millis();
+                    let serial = wall_ms as f64 / 86_400_000.0 + 25_569.0;
+                    format!("{serial:.9}")
+                })
+                .unwrap_or_default();
+        }
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|d| {
+                d.with_timezone(&Local)
+                    .format(&self.datetime_format)
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn map_reason(&self, label: &str) -> String {
+        self.reason_map
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| label.to_string())
+    }
+
+    fn render_cell(&self, column: &str, row: &SummaryRow) -> String {
+        match column {
+            "timestamp" | "date" => self.format_ts(row.ts_ms),
+            "type" => self.map_reason(&row.reason),
+            "action" => row.reason.clone(),
+            "amount" => row.amount.to_string(),
+            // Mirrors `amount` 1:1 — for sheets whose own formulas subtract
+            // expenses from this column.
+            "remaining" => row.amount.to_string(),
+            // Actual post-event balance (not part of the default layout).
+            "balance" | "balance_after" => {
+                row.balance.map(|b| b.to_string()).unwrap_or_default()
+            }
+            // Free-text marker column — intentionally empty, filled in by
+            // hand (event/monster/quest notes).
+            "description" => String::new(),
+            "uid" => row.uid.map(|u| u.to_string()).unwrap_or_default(),
+            "source" => row.source.to_string(),
+            other => {
+                let _ = other;
+                String::new()
+            }
+        }
+    }
+
+    pub fn render_row(&self, row: &SummaryRow) -> Vec<String> {
+        self.columns.iter().map(|c| self.render_cell(c, row)).collect()
+    }
+}
+
 /// Write rows to a CSV file (spreadsheet friendly).
-pub fn write_csv(rows: &[SummaryRow], path: &Path) -> Result<()> {
+pub fn write_csv(rows: &[SummaryRow], path: &Path, config: &ExportConfig) -> Result<()> {
     let mut file = File::create(path)?;
-    writeln!(file, "timestamp,time,uid,action,amount,balance_after,source")?;
+    if config.include_header {
+        writeln!(file, "{}", config.columns.join(","))?;
+    }
     for row in rows {
-        let ts = ms_to_rfc3339(row.ts_ms);
-        writeln!(
-            file,
-            "{},{},{},{},{},{},{}",
-            ts,
-            row.time,
-            row.uid.map(|u| u.to_string()).unwrap_or_default(),
-            csv_escape(&row.reason),
-            row.amount,
-            row.balance.map(|b| b.to_string()).unwrap_or_default(),
-            row.source,
-        )?;
+        let cells: Vec<String> = config
+            .render_row(row)
+            .into_iter()
+            .map(|c| csv_escape(&c))
+            .collect();
+        writeln!(file, "{}", cells.join(","))?;
     }
     println!("Wrote {} rows to {}", rows.len(), path.display());
     Ok(())
 }
 
 /// Copy rows as TSV to the clipboard (paste straight into Google Sheets).
-pub fn copy_clipboard(rows: &[SummaryRow]) -> Result<()> {
-    let mut text = String::from("timestamp\tuid\taction\tamount\tbalance_after\tsource\n");
+pub fn copy_clipboard(rows: &[SummaryRow], config: &ExportConfig) -> Result<()> {
+    let mut text = String::new();
+    if config.include_header {
+        text.push_str(&config.columns.join("\t"));
+        text.push('\n');
+    }
     for row in rows {
-        let ts = ms_to_rfc3339(row.ts_ms);
-        text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
-            ts,
-            row.uid.map(|u| u.to_string()).unwrap_or_default(),
-            row.reason,
-            row.amount,
-            row.balance.map(|b| b.to_string()).unwrap_or_default(),
-            row.source,
-        ));
+        let cells = config.render_row(row);
+        text.push_str(&cells.join("\t"));
+        text.push('\n');
     }
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)?;

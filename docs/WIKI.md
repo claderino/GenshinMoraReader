@@ -119,6 +119,18 @@ Event kinds:
 - `balance` — balance snapshot (login burst / `PlayerPropNotify`-shaped),
   used for calibration and as a safety net
 
+### Export configuration (`export.json`)
+
+Loaded by both the GUI and the CLI `summary`; edited via the GUI's
+⚙ Export settings window.
+
+| Field | Meaning |
+|---|---|
+| `datetime_format` | Any chrono strftime pattern, or `excel` for raw Excel serial numbers (days since 1899-12-30) |
+| `reason_map` | Tracker reason label → custom type string (e.g. `Monster kill → Enemy`); unmapped labels pass through |
+| `columns` | Ordered output columns: `timestamp`, `date`, `type`, `action`, `amount`, `remaining` (**= amount**, for sheets whose own formulas subtract expenses), `balance` (post-event balance), `uid`, `description` (**empty**, hand-filled marker), `source` |
+| `include_header` | Header row on/off (off for paste-appending into an existing sheet) |
+
 The `summary` command de-duplicates the double-reporting of a single gain
 (item-add + prop-change within 5 s, same amount) and keeps the richer
 action label.

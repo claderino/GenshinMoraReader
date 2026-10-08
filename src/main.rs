@@ -298,6 +298,11 @@ fn run_summary(
 
     let events = ledger::load_events(&ledger_path, filter)?;
     let rows = ledger::dedupe(&events);
+    let config = ledger::ExportConfig::load(
+        ledger_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
     let title = match (&filter, uid) {
         (Some(d), Some(uid)) => format!("{} (UID {uid})", d.format("%Y-%m-%d")),
         (Some(d), None) => d.format("%Y-%m-%d").to_string(),
@@ -312,10 +317,10 @@ fn run_summary(
     }
 
     if let Some(csv_path) = csv {
-        ledger::write_csv(&rows, &csv_path)?;
+        ledger::write_csv(&rows, &csv_path, &config)?;
     }
     if clipboard {
-        ledger::copy_clipboard(&rows)?;
+        ledger::copy_clipboard(&rows, &config)?;
     }
 
     Ok(())

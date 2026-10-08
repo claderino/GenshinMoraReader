@@ -16,7 +16,7 @@ use protobuf::Message;
 
 use crate::capture;
 use crate::detect;
-use crate::ledger::{self, LedgerEvent};
+use crate::ledger::{self, ExportConfig, LedgerEvent};
 
 #[derive(Debug)]
 pub enum WorkerMsg {
@@ -282,6 +282,11 @@ struct MoraApp {
     rows: Vec<ledger::SummaryRow>,
     by_action: Vec<(String, i64, i64)>,
 
+    export_config: ledger::ExportConfig,
+    show_settings: bool,
+    /// Reason labels available for mapping (from current rows).
+    mappable_reasons: Vec<String>,
+
     balance: Option<i64>,
     decrypting: bool,
     status: String,
@@ -308,6 +313,9 @@ impl MoraApp {
             events: Vec::new(),
             rows: Vec::new(),
             by_action: Vec::new(),
+            export_config: ledger::ExportConfig::load(&ledger_dir),
+            show_settings: false,
+            mappable_reasons: Vec::new(),
             balance: None,
             decrypting: false,
             status: "Starting…".into(),
@@ -356,6 +364,12 @@ impl MoraApp {
 
         // Latest known balance (fall back to older snapshots if any).
         self.balance = self.events.iter().rev().find_map(|e| e.balance);
+
+        // Distinct reason labels available for mapping.
+        let mut reasons: Vec<String> = self.rows.iter().map(|r| r.reason.clone()).collect();
+        reasons.sort();
+        reasons.dedup();
+        self.mappable_reasons = reasons;
 
         let mut map: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
         for row in &self.rows {
@@ -411,17 +425,154 @@ impl MoraApp {
         };
         let mut path = self.ledger_dir.clone();
         path.push(format!("mora-{uid_part}{stamp}.csv"));
-        match ledger::write_csv(&self.rows, &path) {
+        match ledger::write_csv(&self.rows, &path, &self.export_config) {
             Ok(()) => self.toast = Some(format!("Exported {}", path.display())),
             Err(e) => self.toast = Some(format!("Export failed: {e}")),
         }
     }
 
     fn copy_clipboard(&mut self) {
-        match ledger::copy_clipboard(&self.rows) {
+        match ledger::copy_clipboard(&self.rows, &self.export_config) {
             Ok(()) => self.toast = Some("Copied rows — paste into your spreadsheet".into()),
             Err(e) => self.toast = Some(format!("Clipboard failed: {e}")),
         }
+    }
+
+    /// The export-settings window. Returns true while open.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut stay_open = self.show_settings;
+        egui::Window::new("⚙ Export settings")
+            .open(&mut stay_open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.heading("Timestamp format");
+                ui.horizontal(|ui| {
+                    ui.label("Format:");
+                    ui.text_edit_singleline(&mut self.export_config.datetime_format);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Excel serial").clicked() {
+                        self.export_config.datetime_format = "excel".into();
+                    }
+                    if ui.button("2026-10-08 14:30:05").clicked() {
+                        self.export_config.datetime_format = "%Y-%m-%d %H:%M:%S".into();
+                    }
+                    if ui.button("ISO").clicked() {
+                        self.export_config.datetime_format = "%Y-%m-%dT%H:%M:%S".into();
+                    }
+                });
+                let now_ms = chrono::Local::now().timestamp_millis();
+                ui.small(format!(
+                    "preview: {}",
+                    self.export_config.format_ts(now_ms)
+                ));
+                ui.add_space(6.0);
+
+                ui.heading("Columns");
+                let mut columns = self.export_config.columns.join(", ");
+                ui.text_edit_singleline(&mut columns);
+                if ui.button("Apply columns").clicked() {
+                    self.export_config.columns = columns
+                        .split(',')
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Default (timestamp, uid, action, …)")
+                        .clicked()
+                    {
+                        self.export_config.columns = ExportConfig::default().columns;
+                    }
+                    if ui
+                        .button("Spreadsheet (type, amount, remaining, date, description)")
+                        .clicked()
+                    {
+                        self.export_config.columns = ["type", "amount", "remaining", "date", "description"]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                    }
+                });
+                ui.small(
+                    "available: timestamp, date, type, action, amount, remaining (= amount), \
+                     balance, uid, description (empty, hand-filled), source",
+                );
+                ui.checkbox(&mut self.export_config.include_header, "Include header row");
+                ui.add_space(6.0);
+
+                ui.heading("Reason mappings");
+                ui.small("Exported type ← tracker label (empty = passthrough)");
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        let mut remove: Option<String> = None;
+                        for (label, value) in self.export_config.reason_map.clone() {
+                            ui.horizontal(|ui| {
+                                ui.label(&label);
+                                ui.label("→");
+                                let mut value = value;
+                                ui.text_edit_singleline(&mut value);
+                                if ui.button("✖").clicked() {
+                                    remove = Some(label.clone());
+                                }
+                                self.export_config
+                                    .reason_map
+                                    .insert(label.clone(), value);
+                            });
+                        }
+                        if let Some(label) = remove {
+                            self.export_config.reason_map.remove(&label);
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.menu_button("＋ Add label…", |ui| {
+                        for reason in self.mappable_reasons.clone() {
+                            if !self.export_config.reason_map.contains_key(&reason) {
+                                if ui.button(&reason).clicked() {
+                                    self.export_config
+                                        .reason_map
+                                        .insert(reason.clone(), String::new());
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                        if self.mappable_reasons.is_empty() {
+                            ui.weak("(no rows loaded yet)");
+                        }
+                    });
+                    if ui.button("Map all unmapped to…").clicked() {
+                        // no-op placeholder; label mapping via Add label
+                    }
+                });
+                ui.add_space(6.0);
+
+                ui.heading("Row preview");
+                if let Some(row) = self.rows.last() {
+                    let cells = self.export_config.render_row(row);
+                    ui.monospace(cells.join("  |  "));
+                } else {
+                    ui.weak("(no rows yet)");
+                }
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Err(e) = self.export_config.save(&self.ledger_dir) {
+                            self.toast = Some(format!("Could not save export.json: {e}"));
+                        } else {
+                            self.toast = Some("Export settings saved".into());
+                        }
+                    }
+                    if ui.button("Reset to defaults").clicked() {
+                        self.export_config = ExportConfig::default();
+                    }
+                });
+            });
+        self.show_settings = stay_open;
     }
 }
 
@@ -526,6 +677,9 @@ impl eframe::App for MoraApp {
                 if ui.button("💾 Export CSV").clicked() {
                     self.export_csv();
                 }
+                if ui.button("⚙ Export settings").clicked() {
+                    self.show_settings = true;
+                }
                 if ui.button("↻ Reload history").clicked() {
                     self.reload_history();
                 }
@@ -540,6 +694,10 @@ impl eframe::App for MoraApp {
             });
             ui.add_space(4.0);
         });
+
+        if self.show_settings {
+            self.settings_window(ctx);
+        }
 
         if !self.by_action.is_empty() {
             egui::TopBottomPanel::top("by_action")
