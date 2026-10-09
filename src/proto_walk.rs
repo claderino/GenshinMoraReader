@@ -73,7 +73,7 @@ pub fn parse(buf: &[u8]) -> Option<Fields> {
                 if i + 8 > buf.len() {
                     return None;
                 }
-                let v = u64::from_be_bytes(buf[i..i + 8].try_into().unwrap());
+                let v = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
                 i += 8;
                 Value::Fixed64(v)
             }
@@ -92,7 +92,7 @@ pub fn parse(buf: &[u8]) -> Option<Fields> {
                 if i + 4 > buf.len() {
                     return None;
                 }
-                let v = u32::from_be_bytes(buf[i..i + 4].try_into().unwrap());
+                let v = u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
                 i += 4;
                 Value::Fixed32(v)
             }

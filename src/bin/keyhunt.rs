@@ -1,113 +1,19 @@
-//! Hunts for the (new, 7.1) RSA private key inside the installed game
-//! binaries and tests every candidate against the captured undecryptable
-//! seed blob from the token response dump.
+//! keyhunt v2 — deep static search for RSA key material in the installed
+//! game files, validated against the captured "unknown blob" oracle.
 //!
-//! PKCS#1 RSAPrivateKey DER for a 2048-bit key contains the byte signature
-//! `02 01 00 02 82 01 01` (INTEGER version=0, INTEGER 257-byte modulus).
-//! We scan for that signature, parse the surrounding key, and try to
-//! decrypt the captured blob — a match is provable (yields an 8-byte seed).
+//! Strategies:
+//! 1. Calibration: locate the KNOWN key 5 (raw DER slice, raw modulus, and
+//!    base64-string forms) — tells us where keys live and in what encoding.
+//! 2. Structural scans: PKCS#1 DER signature, PKCS#8 header, PEM text.
+//! 3. Every PKCS#1-shaped candidate is constructed and tested against the
+//!    captured undecryptable blob (and the legacy blob as a sanity oracle).
+//! 4. Targeted string search in IL2CPP metadata for login/key-related names.
 
-use std::path::PathBuf;
-
+use base64::Engine;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey};
 
-fn read_varint(buf: &[u8], i: &mut usize) -> Option<u64> {
-    let mut v: u64 = 0;
-    let mut shift = 0u32;
-    while *i < buf.len() {
-        let b = buf[*i];
-        *i += 1;
-        v |= u64::from(b & 0x7F) << shift;
-        if b & 0x80 == 0 {
-            return Some(v);
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None;
-        }
-    }
-    None
-}
-
-/// Locate the game install directory from the game's own output log
-/// (same trick stardb-exporter uses).
-fn find_game_dir() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    let mut low = PathBuf::from(appdata);
-    low.pop();
-    low.push("LocalLow");
-    low.push("miHoYo");
-
-    for sub in ["Genshin Impact", "原神"] {
-        let log = low.join(sub).join("output_log.txt");
-        let Ok(text) = std::fs::read_to_string(&log) else { continue };
-        for line in text.lines() {
-            for marker in ["GenshinImpact_Data", "YuanShen_Data"] {
-                if let Some(pos) = line.find(marker) {
-                    // Walk back to the drive letter ("X:\").
-                    let head = &line[..pos];
-                    if let Some(colon) = head.rfind(':') {
-                        if colon >= 1 {
-                            let start = colon - 1;
-                            return Some(PathBuf::from(&line[start..pos]));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract the two RSA-encrypted blobs from the token response dump.
-fn extract_blobs(rsp: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    use base64::prelude::*;
-    let mut blobs_256 = Vec::new();
-    let mut i = 0usize;
-    let mut order = 0usize;
-    while i < rsp.len() {
-        let Some(key) = read_varint(rsp, &mut i) else { break };
-        let field = (key >> 3) as u32;
-        let wire = (key & 7) as u8;
-        if field == 0 {
-            break;
-        }
-        match wire {
-            0 => {
-                if read_varint(rsp, &mut i).is_none() {
-                    break;
-                }
-            }
-            1 => i += 8,
-            5 => i += 4,
-            2 => {
-                let Some(len) = read_varint(rsp, &mut i) else { break };
-                let len = len as usize;
-                if i + len > rsp.len() {
-                    break;
-                }
-                let raw = &rsp[i..i + len];
-                i += len;
-                if let Ok(decoded) = BASE64_STANDARD.decode(raw) {
-                    if decoded.len() == 256 {
-                        blobs_256.push(decoded);
-                    }
-                }
-            }
-            _ => break,
-        }
-    }
-    // blobs in wire order: [first(unknown), second(legacy/known)]
-    if blobs_256.len() == 2 {
-        (blobs_256[0].clone(), blobs_256[1].clone())
-    } else {
-        (Vec::new(), Vec::new())
-    }
-}
-
-/// Parse a DER INTEGER starting at `*i` (tag 0x02) into a BigUint.
 fn read_der_int(data: &[u8], i: &mut usize) -> Option<BigUint> {
     if *i >= data.len() || data[*i] != 0x02 {
         return None;
@@ -137,96 +43,210 @@ fn read_der_int(data: &[u8], i: &mut usize) -> Option<BigUint> {
     Some(BigUint::from_bytes_be(bytes))
 }
 
+fn try_parse_pkcs1_at(data: &[u8], start: usize) -> Option<RsaPrivateKey> {
+    let mut p = start;
+    let _version = read_der_int(data, &mut p)?;
+    let n = read_der_int(data, &mut p)?;
+    let e = read_der_int(data, &mut p)?;
+    let d = read_der_int(data, &mut p)?;
+    let prime_p = read_der_int(data, &mut p)?;
+    let prime_q = read_der_int(data, &mut p)?;
+    RsaPrivateKey::from_components(n, e, d, vec![prime_p, prime_q]).ok()
+}
+
+fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            hits.push(i);
+            if hits.len() > 64 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    hits
+}
+
 fn main() {
-    let dump_dir = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap())
+    let dump_dir = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap())
         .join("GenshinReader")
         .join("keydump");
+    let blob_unknown = std::fs::read(dump_dir.join("blob_unknown.bin")).expect("oracle blob");
+    let blob_legacy = std::fs::read(dump_dir.join("blob_legacy.bin")).expect("legacy blob");
 
-    let mut rsp_file = None;
-    for entry in std::fs::read_dir(&dump_dir).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("token_rsp_decrypted_") && name.ends_with(".bin") {
-            rsp_file = Some(entry.path());
-        }
-    }
-    let rsp = std::fs::read(rsp_file.expect("token rsp dump")).unwrap();
-    let (unknown_blob, legacy_blob) = extract_blobs(&rsp);
-    assert!(!unknown_blob.is_empty(), "no blobs found in dump");
-    std::fs::write(dump_dir.join("blob_unknown.bin"), &unknown_blob).unwrap();
-    std::fs::write(dump_dir.join("blob_legacy.bin"), &legacy_blob).unwrap();
-    println!("blobs extracted (unknown/legacy): {}/{} bytes", unknown_blob.len(), legacy_blob.len());
-
-    // Sanity: legacy blob must decrypt with key 5.
     let key5 = RsaPrivateKey::from_pkcs1_pem(&std::fs::read_to_string(
         "vendor/auto-artifactarium/keys/private_key_5.pem",
-    ).unwrap()).unwrap();
-    assert!(
-        key5.decrypt(Pkcs1v15Encrypt, &legacy_blob).is_ok(),
-        "legacy blob does not decrypt with key 5 — dump mismatch"
-    );
-    println!("sanity: legacy blob decrypts with key 5 ✔");
+    )
+    .unwrap())
+    .unwrap();
+    assert!(key5.decrypt(Pkcs1v15Encrypt, &blob_legacy).is_ok());
 
-    let game_dir = find_game_dir().expect("game directory not found");
-    println!("game dir: {}", game_dir.display());
+    // Calibration material derived from the known key.
+    let key5_der = key5
+        .to_pkcs1_der()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let fingerprint = &key5_der[64..192]; // mid-key slice, unique
+    let key5_b64 = base64::engine::general_purpose::STANDARD
+        .encode(&key5_der)
+        .into_bytes();
+    let b64_probe = &key5_b64[0..48]; // ASCII prefix if stored as a b64 string
 
-    let mut targets = vec![game_dir.join("GenshinImpact.exe"), game_dir.join("UnityPlayer.dll")];
-    let ua = game_dir.join("Plugins").join("x86_64").join("UserAssembly.dll");
-    targets.push(ua);
+    let game_dir = std::path::PathBuf::from("E:/Star rail/GenshinImpact/Genshin Impact game");
+    let targets: Vec<std::path::PathBuf> = vec![
+        game_dir.join("GenshinImpact.exe"),
+        game_dir.join("mhypbase.dll"),
+        game_dir.join("rtlbase.dll"),
+        game_dir.join("GenshinImpact_Data/Plugins/kcp.dll"),
+        game_dir.join("GenshinImpact_Data/Native/Data/Metadata/global-metadata.dat"),
+        game_dir.join("GenshinImpact_Data/Native/Data/Metadata/startup-metadata.dat"),
+        game_dir.join("GenshinImpact_Data/Native/Data/etc/mono/4.0/machine.config"),
+    ];
 
-    // PKCS#1 RSAPrivateKey for 2048-bit: SEQUENCE { INTEGER 0, INTEGER n(257), ... }
-    let signature: [u8; 7] = [0x02, 0x01, 0x00, 0x02, 0x82, 0x01, 0x01];
+    const PKCS1_SIG: [u8; 7] = [0x02, 0x01, 0x00, 0x02, 0x82, 0x01, 0x01];
+    const PKCS8_SIG: [u8; 11] = [
+        0x02, 0x01, 0x00, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86,
+    ];
+    const PEM_BEGIN: &[u8] = b"-----BEGIN";
 
-    let mut candidates = 0usize;
-    let mut found = false;
+    let mut candidates_tested = 0usize;
+    let mut found_key6 = false;
 
     for target in &targets {
         let Ok(data) = std::fs::read(target) else {
-            println!("skip (not found): {}", target.display());
+            println!("skip: {}", target.display());
             continue;
         };
-        println!("scanning {} ({} MB)", target.display(), data.len() / 1024 / 1024);
+        let name = target.file_name().unwrap().to_string_lossy();
+        println!(
+            "scanning {} ({} MB)",
+            name,
+            data.len() / 1024 / 1024
+        );
 
-        let mut i = 0usize;
-        while i + signature.len() <= data.len() {
-            if &data[i..i + signature.len()] != &signature {
-                i += 1;
-                continue;
+        // Calibration probes.
+        let raw_hits = find_all(&data, fingerprint);
+        let b64_hits = find_all(&data, b64_probe);
+        if !raw_hits.is_empty() {
+            println!("  !!! key5 DER found RAW at {:?}", raw_hits.iter().take(4).collect::<Vec<_>>());
+        }
+        if !b64_hits.is_empty() {
+            println!("  !!! key5 base64 TEXT found at {:?}", b64_hits.iter().take(4).collect::<Vec<_>>());
+        }
+        if raw_hits.is_empty() && b64_hits.is_empty() {
+            println!("  calibration: key5 not present (raw or b64)");
+        }
+
+        // PKCS#1 structural candidates.
+        for hit in find_all(&data, &PKCS1_SIG) {
+            if let Some(key) = try_parse_pkcs1_at(&data, hit) {
+                candidates_tested += 1;
+                let opens_legacy = key.decrypt(Pkcs1v15Encrypt, &blob_legacy).is_ok();
+                if let Ok(plain) = key.decrypt(Pkcs1v15Encrypt, &blob_unknown) {
+                    let hex: String = plain.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                    println!(
+                        "  !!! KEY6 CANDIDATE at {hit:#x}: opens unknown blob -> {} bytes: {hex}",
+                        plain.len()
+                    );
+                    let pem = key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
+                    let out = dump_dir.join("private_key_6.pem");
+                    std::fs::write(&out, pem.to_string()).unwrap();
+                    println!("  saved {}", out.display());
+                    found_key6 = true;
+                } else if !opens_legacy {
+                    println!("  candidate at {hit:#x}: opens neither blob");
+                } else {
+                    println!("  candidate at {hit:#x}: = key5 (legacy oracle)");
+                }
             }
-            let mut p = i;
-            let _version = read_der_int(&data, &mut p);
-            let Some(n) = read_der_int(&data, &mut p) else { i += 1; continue };
-            let Some(e) = read_der_int(&data, &mut p) else { i += 1; continue };
-            let Some(d) = read_der_int(&data, &mut p) else { i += 1; continue };
-            let Some(prime_p) = read_der_int(&data, &mut p) else { i += 1; continue };
-            let Some(prime_q) = read_der_int(&data, &mut p) else { i += 1; continue };
+        }
 
-            candidates += 1;
-            match RsaPrivateKey::from_components(n.clone(), e.clone(), d.clone(), vec![prime_p, prime_q]) {
-                Ok(key) => {
-                    if let Ok(plain) = key.decrypt(Pkcs1v15Encrypt, &unknown_blob) {
-                        let hex = plain.iter().map(|b| format!("{b:02x}")).collect::<String>();
-                        println!(
-                            "!!! KEY FOUND at offset {i:#x} in {}: {} bits, decrypts unknown blob -> {} bytes: {hex}",
-                            target.display(),
-                            key.n().bits(),
-                            plain.len(),
-                        );
-                        let pem = key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
-                        let out = dump_dir.join("private_key_6.pem");
-                        std::fs::write(&out, pem.to_string()).unwrap();
-                        println!("saved {}", out.display());
-                        found = true;
+        // PKCS#8-wrapped candidates: parse the inner PKCS#1 after the header.
+        for hit in find_all(&data, &PKCS8_SIG) {
+            // inner DER starts after AlgorithmIdentifier + OCTET STRING tag
+            let mut probe = hit + PKCS8_SIG.len();
+            // skip: 06 09 <oid9> 05 00 04 82 <len2>
+            if data.get(probe) == Some(&0x06) {
+                let oid_len = *data.get(probe + 1).unwrap_or(&0) as usize;
+                probe += 2 + oid_len;
+                if data.get(probe) == Some(&0x05) {
+                    probe += 2; // NULL
+                    if data.get(probe) == Some(&0x04) {
+                        probe += 1;
+                        let l = match data.get(probe) {
+                            Some(&0x82) => {
+                                let v = u16::from_be_bytes([
+                                    *data.get(probe + 1).unwrap_or(&0),
+                                    *data.get(probe + 2).unwrap_or(&0),
+                                ]) as usize;
+                                probe += 3;
+                                v
+                            }
+                            _ => continue,
+                        };
+                        let _ = l;
+                        if let Some(key) = try_parse_pkcs1_at(&data, probe) {
+                            candidates_tested += 1;
+                            if let Ok(plain) = key.decrypt(Pkcs1v15Encrypt, &blob_unknown) {
+                                let hex: String =
+                                    plain.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                                println!("  !!! KEY6 (PKCS#8) at {hit:#x}: {} bytes {hex}", plain.len());
+                                let pem = key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
+                                std::fs::write(dump_dir.join("private_key_6.pem"), pem.to_string())
+                                    .unwrap();
+                                found_key6 = true;
+                            }
+                        }
                     }
                 }
-                Err(_) => {}
             }
-            i += 1;
+        }
+
+        // PEM text blocks.
+        for hit in find_all(&data, PEM_BEGIN) {
+            let scan_end = (hit + 4096).min(data.len());
+            let end = data[hit..scan_end]
+                .windows(8)
+                .position(|w| w == b"-----END")
+                .map(|p| hit + p + 64)
+                .unwrap_or(scan_end);
+            let text = String::from_utf8_lossy(&data[hit..end]).to_string();
+            if let Ok(key) = RsaPrivateKey::from_pkcs1_pem(&text) {
+                candidates_tested += 1;
+                if let Ok(plain) = key.decrypt(Pkcs1v15Encrypt, &blob_unknown) {
+                    println!("  !!! KEY6 (PEM) at {hit:#x}: {} bytes", plain.len());
+                    std::fs::write(
+                        dump_dir.join("private_key_6.pem"),
+                        key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap().to_string(),
+                    )
+                    .unwrap();
+                    found_key6 = true;
+                }
+            }
+        }
+
+        // Targeted metadata strings.
+        if name.contains("metadata") {
+            for probe_str in ["GetPlayerToken", "PlayerTokenRsp", "GenKey", "RsaKey"] {
+                let hits = find_all(&data, probe_str.as_bytes());
+                if !hits.is_empty() {
+                    println!(
+                        "  string '{probe_str}' at {:?}",
+                        hits.iter().take(3).collect::<Vec<_>>()
+                    );
+                }
+            }
         }
     }
 
-    println!("scanned {candidates} candidate keys");
-    if !found {
-        println!("no candidate decrypts the unknown blob (key may be obfuscated/derived at runtime)");
+    println!("structural candidates tested: {candidates_tested}");
+    if !found_key6 {
+        println!("no key for the unknown blob found in static scan");
     }
 }

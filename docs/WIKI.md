@@ -220,6 +220,35 @@ fast relogin ─► handshake ──► GetPlayerTokenRsp (2 RSA blobs, new path
   storage and everything downstream stays ready; the next cold start just
   works.
 
+### Relogin deep-dive (2026-10-08 forensics)
+
+A request/response diff between a captured cold login and relogin
+(`keydump/dispatch_*.bin`) established:
+
+1. **The requests are structurally identical** — same 14 fields in both
+   paths; the relogin request carries *no* new client-side key material.
+   An ephemeral/Diffie-Hellman client share is ruled out.
+2. **The relogin token response is not plain protobuf** — field parsing
+   desyncs early (header_len 14 vs the usual 9–11; body appears compressed
+   or re-encrypted). It is also ~5.4 KB smaller than the cold-start form.
+3. **The relogin flow adds command 20324** between request and response:
+   two binary chunks (3,320 + 2,584 bytes) sharing the magic prefix
+   `43 2B 0F 35 2C 24`, plus a true-epoch-seconds timestamp and a `60`
+   version-ish varint. A container format absent from cold-start flows
+   (possibly the "Oodle Network" layer suspected in irminsul#163 — no
+   standalone Oodle DLL ships, so statically linked or custom).
+4. **Static key hunt (calibrated)**: the *known* key 5 exists nowhere on
+   disk (raw DER, raw modulus, or base64 text) across GenshinImpact.exe,
+   mhypbase.dll, rtlbase.dll, kcp.dll and the IL2CPP metadata — keys are
+   runtime-derived, and `global-metadata.dat` is itself encrypted (not even
+   "GetPlayerToken" is findable as plain ASCII).
+
+**Conclusion:** the relogin path is a new protocol *generation*
+(compressed/re-keyed exchange), not merely a missing key. Supporting it
+passively requires reverse-engineering that layer — upstream-community
+territory; `cargo run --bin keyhunt` re-runs the calibrated scan whenever a
+new game version lands.
+
 ### 7.x wire headers contain almost nothing
 
 Sampled session command headers are 9 bytes: fields 3 (`seq`) and 6

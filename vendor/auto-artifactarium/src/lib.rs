@@ -233,6 +233,9 @@ pub struct GameSniffer {
     /// 7.x PacketHead.user_id is not populated, so this is the reliable
     /// per-account marker.
     account_uid: Option<u32>,
+    /// Bounded counter of dispatch-phase commands dumped for protocol
+    /// analysis (cold-start vs relogin diffing).
+    dispatch_dumped: u32,
     /// Exhausted key searches (sent_time, seed) — avoids re-running the
     /// expensive extended sweep for every subsequent packet of a login
     /// that fundamentally cannot be decrypted.
@@ -295,6 +298,7 @@ impl GameSniffer {
                 self.recv_conv_mismatches = 0;
                 self.failed_key_search = None;
                 self.account_uid = None;
+                self.dispatch_dumped = 0;
                 Some(GamePacket::Connection(packet))
             }
             ConnectionPacket::HandshakeEstablished | ConnectionPacket::Disconnected => {
@@ -489,6 +493,27 @@ impl GameSniffer {
         // }
 
         if let Some(Dispatch(_)) = &self.key {
+            // GenshinReader forensics: dump the first few dispatch-phase
+            // command bodies (requests AND responses) so login flows can be
+            // diffed offline (cold start vs relogin).
+            if self.dispatch_dumped < 8 {
+                self.dispatch_dumped += 1;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let dir = std::env::var_os("LOCALAPPDATA")
+                    .map(std::path::PathBuf::from)
+                    .map(|base| base.join("GenshinReader").join("keydump"));
+                if let Some(dir) = dir {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(
+                        dir.join(format!("dispatch_{}_{ts}.bin", command.command_id)),
+                        &command.proto_data,
+                    );
+                }
+            }
+
             // GenshinReader diagnostics: log the wire header of every
             // dispatch-phase command (packet_id + the sender's timestamp —
             // the client's own requests reveal its true clock). The header

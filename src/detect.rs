@@ -380,7 +380,7 @@ mod tests {
 
     fn float_field(field: u32, value: f32) -> Vec<u8> {
         let mut out = vec![((field << 3) | 5) as u8];
-        out.extend_from_slice(&value.to_bits().to_be_bytes());
+        out.extend_from_slice(&value.to_bits().to_le_bytes());
         out
     }
 
