@@ -5,6 +5,12 @@
 //! (KCP reassembly + session-key capture + XOR decrypt) → value-pattern
 //! protobuf detection of Mora events → JSONL ledger + live console feed.
 
+// Release builds: GUI subsystem (no console window) for the default GUI
+// mode; tracing goes to %LOCALAPPDATA%\GenshinReader\app.log. Debug
+// builds keep the console. CLI subcommands with console output run via
+// `debug_assertions` builds or redirect explicitly.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod admin;
 mod capture;
 mod detect;
@@ -136,17 +142,88 @@ fn run_gui(ledger_path: PathBuf, no_elevate: bool) -> Result<()> {
     gui::run(ledger_path)
 }
 
+/// Release builds run with the windows GUI subsystem (no console), so
+/// tracing goes to a log file instead of stdout.
+#[cfg(not(debug_assertions))]
+mod log_file {
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    static FILE: Mutex<Option<File>> = Mutex::new(None);
+
+    pub fn open(path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            *FILE.lock().unwrap() = Some(f);
+        }
+    }
+
+    pub struct W;
+    impl Write for W {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut g) = FILE.lock() {
+                if let Some(f) = g.as_mut() {
+                    let _ = f.write(buf);
+                }
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if let Ok(mut g) = FILE.lock() {
+                if let Some(f) = g.as_mut() {
+                    let _ = f.flush();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    pub struct Maker;
+    impl MakeWriter<'_> for Maker {
+        type Writer = W;
+        fn make_writer(&self) -> Self::Writer {
+            W
+        }
+    }
+}
+
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            // Default: our own info logs, but silence the sniffer's chatty
+            // KCP warnings (harmless mid-stream reassembly noise, e.g.
+            // duplicated packets seen at multiple capture components).
+            "warn,auto_artifactarium::kcp=off,genshin_mora_reader=info"
+                .into()
+        });
+    #[cfg(not(debug_assertions))]
+    {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            log_file::open(
+                &std::path::PathBuf::from(base)
+                    .join("GenshinReader")
+                    .join("app.log"),
+            );
+        }
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(log_file::Maker)
+            .init();
+    }
+    #[cfg(debug_assertions)]
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
 async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // Default: our own info logs, but silence the sniffer's chatty
-                // KCP warnings (harmless mid-stream reassembly noise, e.g.
-                // duplicated packets seen at multiple capture components).
-                "warn,auto_artifactarium::kcp=off,genshin_mora_reader=info".into()
-            }),
-        )
-        .init();
+    init_tracing();
 
     // Packet capture via ETW needs elevation.
     if !admin::is_elevated() {
