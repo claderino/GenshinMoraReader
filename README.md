@@ -1,4 +1,4 @@
-# GenshinReader
+# GenshinReader - AI SLOP
 
 Passively reads Genshin Impact's network traffic and records **every Mora gain — and the action that earned it** (monster kills, chests, quests, commissions, domains, expeditions, reputation, ~250 named reasons in total). Also tracks spending and your running balance.
 
