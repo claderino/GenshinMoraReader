@@ -292,6 +292,8 @@ struct MoraApp {
     /// When true, rows are filtered to events newer than the last
     /// export marker for the current view.
     since_export: bool,
+    /// Unsaved description edits (flushed to export.json on focus loss).
+    export_dirty: bool,
 
     balance: Option<i64>,
     decrypting: bool,
@@ -324,6 +326,7 @@ impl MoraApp {
             mappable_reasons: Vec::new(),
             export_markers: Self::load_export_markers(&ledger_dir),
             since_export: true,
+            export_dirty: false,
             balance: None,
             decrypting: false,
             status: "Starting…".into(),
@@ -829,6 +832,7 @@ impl eframe::App for MoraApp {
                 .column(Column::remainder())
                 .column(Column::exact(88.0))
                 .column(Column::initial(120.0))
+                .column(Column::initial(160.0))
                 .column(Column::exact(64.0))
                 .header(24.0, |mut header| {
                     header.col(|ui| { ui.strong("time"); });
@@ -836,6 +840,7 @@ impl eframe::App for MoraApp {
                     header.col(|ui| { ui.strong("action"); });
                     header.col(|ui| { ui.strong("uid"); });
                     header.col(|ui| { ui.strong("balance after"); });
+                    header.col(|ui| { ui.strong("description"); });
                     header.col(|ui| { ui.strong("src"); });
                 })
                 .body(|mut body| {
@@ -872,6 +877,40 @@ impl eframe::App for MoraApp {
                                     )
                                     .weak(),
                                 );
+                            });
+                            row.col(|ui| {
+                                // Editable per-row description — persisted
+                                // into the export config (keyed uid:ts_ms)
+                                // and exported via the `description` column.
+                                let key = ledger::row_key(item);
+                                let buf = self
+                                    .export_config
+                                    .descriptions
+                                    .entry(key)
+                                    .or_default();
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .hint_text("…")
+                                        .desired_width(
+                                            f32::INFINITY,
+                                        ),
+                                );
+                                if resp.changed() {
+                                    self.export_dirty = true;
+                                }
+                                if resp.lost_focus()
+                                    && self.export_dirty
+                                {
+                                    // Drop empty entries to keep the file
+                                    // compact.
+                                    self.export_config
+                                        .descriptions
+                                        .retain(|_, v| !v.is_empty());
+                                    let _ = self
+                                        .export_config
+                                        .save(&self.ledger_dir);
+                                    self.export_dirty = false;
+                                }
                             });
                             row.col(|ui| {
                                 ui.monospace(egui::RichText::new(item.source).weak());

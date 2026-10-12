@@ -523,6 +523,10 @@ pub struct ExportConfig {
     pub columns: Vec<String>,
     /// Whether to include a header row.
     pub include_header: bool,
+    /// User-entered per-row descriptions, keyed `"{uid}:{ts_ms}"`.
+    /// Edited in the GUI table; exported via the `description` column.
+    #[serde(default)]
+    pub descriptions: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ExportConfig {
@@ -535,8 +539,14 @@ impl Default for ExportConfig {
                 .map(|s| s.to_string())
                 .collect(),
             include_header: true,
+            descriptions: Default::default(),
         }
     }
+}
+
+/// Stable per-row description key: `"{uid}:{ts_ms}"`.
+pub fn row_key(row: &SummaryRow) -> String {
+    format!("{}:{}", row.uid.unwrap_or(0), row.ts_ms)
 }
 
 impl ExportConfig {
@@ -598,9 +608,13 @@ impl ExportConfig {
             "balance" | "balance_after" => {
                 row.balance.map(|b| b.to_string()).unwrap_or_default()
             }
-            // Free-text marker column — intentionally empty, filled in by
-            // hand (event/monster/quest notes).
-            "description" => String::new(),
+            // Free-text description — user-entered in the GUI table
+            // (keyed uid:ts_ms), included in CSV/clipboard exports.
+            "description" => self
+                .descriptions
+                .get(&row_key(row))
+                .cloned()
+                .unwrap_or_default(),
             "uid" => row.uid.map(|u| u.to_string()).unwrap_or_default(),
             "source" => row.source.to_string(),
             other => {
