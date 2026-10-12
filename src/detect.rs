@@ -370,22 +370,29 @@ pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
     out
 }
 
-/// GadgetInteractRsp (881): `{3: gadget_id, 15: gadget_entity_id}` —
-/// the server-confirmed F-press on a gadget; its gadget_id identifies
-/// the chest tier for the ItemAdd that follows. Returns the ENTITY id
-/// (resolve the config via the gadget-id registry).
-pub fn detect_gadget_interact_entity(cmd: &GameCommand) -> Option<u64> {
+/// GadgetInteractRsp (881): `{3: gadget_id, 11: interact_type, 15:
+/// gadget_entity_id}` — the server-confirmed F-press on a gadget.
+/// Returns (entity_id, interact_type); 3 = OPEN_CHEST, 8 =
+/// GENERAL_REWARD — only chest-family interacts drive tier labeling
+/// (PICK_ITEM ×1809 per session would otherwise pollute the
+/// correlation).
+pub fn detect_gadget_interact_entity(
+    cmd: &GameCommand,
+) -> Option<(u64, u64)> {
     if cmd.command_id != 881 {
         return None;
     }
     let fields = parse(&cmd.proto_data)?;
     let mut entity_id = None;
+    let mut interact_type = None;
     for (f, v) in &fields {
-        if *f == 15 {
-            entity_id = v.as_varint();
+        match *f {
+            15 => entity_id = v.as_varint(),
+            11 => interact_type = v.as_varint(),
+            _ => {}
         }
     }
-    entity_id
+    Some((entity_id?, interact_type?))
 }
 
 /// Candidate self-UIDs from SceneAvatarInfo-shaped submessages:

@@ -353,14 +353,22 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
                             if gadget_ids.len() > 65_536 {
                                 gadget_ids.clear();
                             }
-                            if let Some(_entity) =
+                            if let Some((_entity, ity)) =
                                 detect::detect_gadget_interact_entity(command)
                             {
-                                if let Some(gid) =
-                                    gadget_ids.get(&_entity).copied()
-                                {
-                                    last_chest_gadget =
-                                        Some((gid, std::time::Instant::now()));
+                                // Only chest-family interacts (3 =
+                                // OPEN_CHEST, 8 = GENERAL_REWARD) —
+                                // PICK_ITEM/GATHER noise must not drive
+                                // the tier correlation.
+                                if matches!(ity, 3 | 8) {
+                                    if let Some(gid) =
+                                        gadget_ids.get(&_entity).copied()
+                                    {
+                                        last_chest_gadget = Some((
+                                            gid,
+                                            std::time::Instant::now(),
+                                        ));
+                                    }
                                 }
                             }
                             for mut event in

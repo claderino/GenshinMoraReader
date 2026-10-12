@@ -314,11 +314,12 @@ pub fn chest_label(gadget_id: u64) -> Option<&'static str> {
         | 70_211_032 | 70_211_131 | 70_211_132 | 70_211_159
         | 70_211_163 => "Luxurious Chest",
         // Regional mora chests (gadget families observed in 7.x
-        // captures — type Gadget/item-tag; extend this list as new
-        // regions appear).
+        // captures — type Gadget with empty names in community
+        // tables; extend as new regions appear). NOTE: 70610004 is an
+        // EnergyBall, NOT a mora chest — excluded.
         70_600_022 | 70_600_032 | 70_600_033 | 70_600_041
-        | 70_600_042 | 70_600_043 | 70_600_044 | 70_600_065
-        | 70_610_004 | 70_331_081 => "Mora chest",
+        | 70_600_042 | 70_600_043 | 70_600_044 | 705_900_11
+        | 703_310_81 => "Mora chest",
         _ => return None,
     })
 }
