@@ -829,18 +829,18 @@ impl eframe::App for MoraApp {
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(84.0))
                 .column(Column::exact(92.0))
+                .column(Column::initial(160.0))
                 .column(Column::remainder())
                 .column(Column::exact(88.0))
                 .column(Column::initial(120.0))
-                .column(Column::initial(160.0))
                 .column(Column::exact(64.0))
                 .header(24.0, |mut header| {
                     header.col(|ui| { ui.strong("time"); });
                     header.col(|ui| { ui.strong("amount"); });
                     header.col(|ui| { ui.strong("action"); });
+                    header.col(|ui| { ui.strong("description"); });
                     header.col(|ui| { ui.strong("uid"); });
                     header.col(|ui| { ui.strong("balance after"); });
-                    header.col(|ui| { ui.strong("description"); });
                     header.col(|ui| { ui.strong("src"); });
                 })
                 .body(|mut body| {
@@ -864,19 +864,6 @@ impl eframe::App for MoraApp {
                             });
                             row.col(|ui| {
                                 ui.label(&item.reason);
-                            });
-                            row.col(|ui| {
-                                ui.monospace(egui::RichText::new(
-                                    item.uid.map(|u| u.to_string()).unwrap_or_else(|| "—".into()),
-                                ).weak());
-                            });
-                            row.col(|ui| {
-                                ui.monospace(
-                                    egui::RichText::new(
-                                        item.balance.map(|b| thousands(b)).unwrap_or_default(),
-                                    )
-                                    .weak(),
-                                );
                             });
                             row.col(|ui| {
                                 // Editable per-row description — persisted
@@ -911,6 +898,19 @@ impl eframe::App for MoraApp {
                                         .save(&self.ledger_dir);
                                     self.export_dirty = false;
                                 }
+                            });
+                            row.col(|ui| {
+                                ui.monospace(egui::RichText::new(
+                                    item.uid.map(|u| u.to_string()).unwrap_or_else(|| "—".into()),
+                                ).weak());
+                            });
+                            row.col(|ui| {
+                                ui.monospace(
+                                    egui::RichText::new(
+                                        item.balance.map(|b| thousands(b)).unwrap_or_default(),
+                                    )
+                                    .weak(),
+                                );
                             });
                             row.col(|ui| {
                                 ui.monospace(egui::RichText::new(item.source).weak());
