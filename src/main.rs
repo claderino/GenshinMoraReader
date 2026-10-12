@@ -263,6 +263,10 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
     let mut commands_seen: u64 = 0;
     let mut console_uid: Option<u32> = None;
     let mut uid_votes: std::collections::HashMap<u32, u32> = Default::default();
+    // Gadget id tracking for chest-tier resolution (see run_capture).
+    let mut gadget_ids: std::collections::HashMap<u64, u64> =
+        Default::default();
+    let mut last_chest_gadget: Option<(u64, std::time::Instant)> = None;
 
     loop {
         tokio::select! {
@@ -336,7 +340,54 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
                                     }
                                 }
                             }
-                            for event in detect::detect_mora_events(command) {
+                            // Gadget id tracking: entity id → config id
+                            // (27685 appears), and the most recent
+                            // GadgetInteractRsp gadget id — correlates
+                            // with chest ItemAdds to resolve the exact
+                            // tier (Common/Exquisite/…/Mora chest).
+                            for (eid, gid) in
+                                detect::detect_gadget_ids(command)
+                            {
+                                gadget_ids.insert(eid, gid);
+                            }
+                            if gadget_ids.len() > 65_536 {
+                                gadget_ids.clear();
+                            }
+                            if let Some(_entity) =
+                                detect::detect_gadget_interact_entity(command)
+                            {
+                                if let Some(gid) =
+                                    gadget_ids.get(&_entity).copied()
+                                {
+                                    last_chest_gadget =
+                                        Some((gid, std::time::Instant::now()));
+                                }
+                            }
+                            for mut event in
+                                detect::detect_mora_events(command)
+                            {
+                                // Attach the recent interact's gadget id
+                                // to chest-family ItemAdds.
+                                if let MoraEvent::ItemAdd {
+                                    action_reason: Some(r),
+                                    ref mut gadget_id,
+                                    ..
+                                } = event
+                                {
+                                    if matches!(r, 39) {
+                                        if let Some((gid, t)) =
+                                            last_chest_gadget
+                                        {
+                                            if t.elapsed()
+                                                < std::time::Duration::from_millis(
+                                                    4000,
+                                                )
+                                            {
+                                                *gadget_id = Some(gid);
+                                            }
+                                        }
+                                    }
+                                }
                                 record_event(&mut ledger, &event);
                             }
                         }

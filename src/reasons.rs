@@ -280,6 +280,66 @@ pub fn prop_change_reason_name(raw: u32) -> Option<&'static str> {
 
 /// Friendly, human-readable labels for the most common Mora sources.
 /// Falls back to the raw enum name when no label exists.
+/// Chest-family label from the gadget config id
+/// (GadgetExcelConfigData, `SceneObj_Chest_*_LvN` — Lv1 common, Lv2
+/// exquisite, Lv4 precious, Lv5 luxurious; Lv3 unused; Locked_* are
+/// the guarded variants of the same tier). Regional mora chests
+/// (Wooden/Fontaine/Natlan/Nod-Krai/… families) are separate gadget
+/// ids — the observed ones are listed here; extend as captures show
+/// more.
+pub fn chest_label(gadget_id: u64) -> Option<&'static str> {
+    Some(match gadget_id {
+        // Lv1 — common
+        70_210_011 | 70_210_012 | 70_210_013 | 70_210_014 | 70_210_063
+        | 70_210_118 | 70_210_119 | 70_210_120 | 70_211_001
+        | 70_211_002 | 70_211_101 | 70_211_102 | 70_211_103
+        | 70_211_104 | 70_211_156 | 70_211_160 | 70_211_166 => {
+            "Common Chest"
+        }
+        // Lv2 — exquisite
+        70_210_021 | 70_210_022 | 70_210_023 | 70_210_024
+        | 70_210_121 | 70_210_122 | 70_211_011 | 70_211_012
+        | 70_211_111 | 70_211_112 | 70_211_157 | 70_211_161
+        | 70_211_167 | 70_220_129 => "Exquisite Chest",
+        // Lv4 — precious
+        70_210_041 | 70_210_042 | 70_210_043 | 70_210_044
+        | 70_210_115 | 70_210_123 | 70_210_124 | 70_211_021
+        | 70_211_022 | 70_211_121 | 70_211_122 | 70_211_123
+        | 70_211_150 | 70_211_151 | 70_211_158 | 70_211_162 => {
+            "Precious Chest"
+        }
+        // Lv5 — luxurious
+        70_210_051 | 70_210_052 | 70_210_053 | 70_210_054
+        | 70_210_116 | 70_210_125 | 70_210_126 | 70_211_031
+        | 70_211_032 | 70_211_131 | 70_211_132 | 70_211_159
+        | 70_211_163 => "Luxurious Chest",
+        // Regional mora chests (gadget families observed in 7.x
+        // captures — type Gadget/item-tag; extend this list as new
+        // regions appear).
+        70_600_022 | 70_600_032 | 70_600_033 | 70_600_041
+        | 70_600_042 | 70_600_043 | 70_600_044 | 70_600_065
+        | 70_610_004 | 70_331_081 => "Mora chest",
+        _ => return None,
+    })
+}
+
+/// `action_reason_label` with chest-family refinement: reason 39
+/// (OPEN_CHEST) resolves the exact tier from the interacting gadget's
+/// config id when known.
+pub fn action_reason_label_tiered(
+    raw: u32,
+    gadget_id: Option<u64>,
+) -> String {
+    if matches!(raw, 39) {
+        if let Some(label) =
+            gadget_id.and_then(chest_label)
+        {
+            return label.to_string();
+        }
+    }
+    action_reason_label(raw)
+}
+
 pub fn action_reason_label(raw: u32) -> String {
     let friendly = match raw {
         1 => "Quest item",

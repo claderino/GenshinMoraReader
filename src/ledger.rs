@@ -148,10 +148,12 @@ impl Ledger {
                     *prop_reason,
                 )
             }
-            MoraEvent::ItemAdd { count, action_reason, .. } => (
+            MoraEvent::ItemAdd { count, action_reason, gadget_id, .. } => (
                 "item_add".to_string(),
                 Some(*count as i64),
-                action_reason.map(crate::reasons::action_reason_label),
+                action_reason.map(|r| {
+                    crate::reasons::action_reason_label_tiered(r, *gadget_id)
+                }),
                 *action_reason,
             ),
             MoraEvent::Balance { balance, .. } => {

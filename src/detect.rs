@@ -47,6 +47,10 @@ pub enum MoraEvent {
         count: u64,
         action_reason: Option<u32>,
         command_id: u16,
+        /// The interacting gadget's config id when a GadgetInteractRsp
+        /// (881) preceded this ItemAdd within a few seconds — resolves
+        /// the exact chest tier (see `reasons::chest_label`).
+        gadget_id: Option<u64>,
     },
     /// Balance snapshot observed in a prop map
     /// (`PlayerPropNotify` / login data shaped).
@@ -313,8 +317,75 @@ fn detect_item_adds(fields: &Fields, command_id: u16) -> Vec<MoraEvent> {
             count,
             action_reason: reason,
             command_id,
+            gadget_id: None,
         })
         .collect()
+}
+
+/// Gadget entity id → config id from SceneEntityAppearNotify (27685)
+/// gadget entities (`{1: type=4, 2: entity_id, 13: gadget{1:
+/// gadget_id}}`). Just the ids — the Reader doesn't need positions.
+pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
+    if cmd.command_id != 27685 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let Some(fields) = parse(&cmd.proto_data) else {
+        return out;
+    };
+    for (f, v) in &fields {
+        if *f != 8 {
+            continue;
+        }
+        let Some(bytes) = v.as_bytes() else { continue };
+        let Some(entity) = parse(bytes) else { continue };
+        let mut entity_type = None;
+        let mut entity_id = None;
+        let mut gadget_id = None;
+        for (ef, ev) in &entity {
+            match *ef {
+                1 => entity_type = ev.as_varint(),
+                2 => entity_id = ev.as_varint(),
+                13 => {
+                    if let Some(gadget) = ev.as_bytes() {
+                        if let Some(gf) = parse(gadget) {
+                            for (gfn, gv) in &gf {
+                                if *gfn == 1 {
+                                    gadget_id = gv.as_varint();
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // ProtEntityType 4 = gadget.
+        if entity_type == Some(4) {
+            if let Some(id) = entity_id {
+                out.push((id, gadget_id.unwrap_or(0)));
+            }
+        }
+    }
+    out
+}
+
+/// GadgetInteractRsp (881): `{3: gadget_id, 15: gadget_entity_id}` —
+/// the server-confirmed F-press on a gadget; its gadget_id identifies
+/// the chest tier for the ItemAdd that follows. Returns the ENTITY id
+/// (resolve the config via the gadget-id registry).
+pub fn detect_gadget_interact_entity(cmd: &GameCommand) -> Option<u64> {
+    if cmd.command_id != 881 {
+        return None;
+    }
+    let fields = parse(&cmd.proto_data)?;
+    let mut entity_id = None;
+    for (f, v) in &fields {
+        if *f == 15 {
+            entity_id = v.as_varint();
+        }
+    }
+    entity_id
 }
 
 /// Candidate self-UIDs from SceneAvatarInfo-shaped submessages:
