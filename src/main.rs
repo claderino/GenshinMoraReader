@@ -266,6 +266,10 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
     // Gadget id tracking for chest-tier resolution (see run_capture).
     let mut gadget_ids: std::collections::HashMap<u64, u64> =
         Default::default();
+    // Scene-local config id → gadget family id (WorldChestOpenNotify
+    // references the config id).
+    let mut config_ids: std::collections::HashMap<u64, u64> =
+        Default::default();
     let mut last_chest_gadget: Option<(u64, std::time::Instant)> = None;
 
     loop {
@@ -340,18 +344,22 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
                                     }
                                 }
                             }
-                            // Gadget id tracking: entity id → config id
-                            // (27685 appears), and the most recent
-                            // GadgetInteractRsp gadget id — correlates
-                            // with chest ItemAdds to resolve the exact
-                            // tier (Common/Exquisite/…/Mora chest).
-                            for (eid, gid) in
+                            // Gadget id tracking: entity id and scene-local
+                            // config id → gadget family id (27685
+                            // appears), plus the interact / world-chest-open
+                            // signals that correlate with chest ItemAdds
+                            // to resolve the exact tier.
+                            for (eid, cfg, gid) in
                                 detect::detect_gadget_ids(command)
                             {
                                 gadget_ids.insert(eid, gid);
+                                if cfg != 0 {
+                                    config_ids.insert(cfg, gid);
+                                }
                             }
                             if gadget_ids.len() > 65_536 {
                                 gadget_ids.clear();
+                                config_ids.clear();
                             }
                             if let Some((_entity, ity)) =
                                 detect::detect_gadget_interact_entity(command)
@@ -371,6 +379,26 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
                                     }
                                 }
                             }
+                            // WorldChestOpenNotify: the authoritative
+                            // chest-open moment — resolves locked chests
+                            // whose F-press interact happened long before
+                            // the loot landed.
+                            if let Some(cfg) =
+                                detect::detect_world_chest_config(command)
+                            {
+                                if let Some(gid) =
+                                    config_ids.get(&cfg).copied()
+                                {
+                                    tracing::debug!(
+                                        gadget_id = gid,
+                                        "world chest open resolved"
+                                    );
+                                    last_chest_gadget = Some((
+                                        gid,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                            }
                             for mut event in
                                 detect::detect_mora_events(command)
                             {
@@ -388,10 +416,24 @@ async fn run_capture(ledger_path: PathBuf, no_elevate: bool, stats: bool) -> Res
                                         {
                                             if t.elapsed()
                                                 < std::time::Duration::from_millis(
-                                                    4000,
+                                                    8000,
                                                 )
                                             {
                                                 *gadget_id = Some(gid);
+                                                tracing::info!(
+                                                    gadget_id = gid,
+                                                    age_ms = t
+                                                        .elapsed()
+                                                        .as_millis() as u64,
+                                                    "chest tier resolved"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    "chest ItemAdd with \
+                                                     stale gadget \
+                                                     signal — plain \
+                                                     label"
+                                                );
                                             }
                                         }
                                     }

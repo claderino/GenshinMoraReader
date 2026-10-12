@@ -322,10 +322,12 @@ fn detect_item_adds(fields: &Fields, command_id: u16) -> Vec<MoraEvent> {
         .collect()
 }
 
-/// Gadget entity id → config id from SceneEntityAppearNotify (27685)
-/// gadget entities (`{1: type=4, 2: entity_id, 13: gadget{1:
-/// gadget_id}}`). Just the ids — the Reader doesn't need positions.
-pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
+/// Gadget entity id → (config id, gadget family id) from
+/// SceneEntityAppearNotify (27685) gadget entities (`{1: type=4,
+/// 2: entity_id, 13: gadget{1: gadget_id, 2: group_id, 3:
+/// config_id}}`). Two keys: entity id and the scene-local config id
+/// (WorldChestOpenNotify references the latter).
+pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64, u64)> {
     if cmd.command_id != 27685 {
         return Vec::new();
     }
@@ -342,6 +344,7 @@ pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
         let mut entity_type = None;
         let mut entity_id = None;
         let mut gadget_id = None;
+        let mut config_id = None;
         for (ef, ev) in &entity {
             match *ef {
                 1 => entity_type = ev.as_varint(),
@@ -350,8 +353,10 @@ pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
                     if let Some(gadget) = ev.as_bytes() {
                         if let Some(gf) = parse(gadget) {
                             for (gfn, gv) in &gf {
-                                if *gfn == 1 {
-                                    gadget_id = gv.as_varint();
+                                match *gfn {
+                                    1 => gadget_id = gv.as_varint(),
+                                    3 => config_id = gv.as_varint(),
+                                    _ => {}
                                 }
                             }
                         }
@@ -363,11 +368,34 @@ pub fn detect_gadget_ids(cmd: &GameCommand) -> Vec<(u64, u64)> {
         // ProtEntityType 4 = gadget.
         if entity_type == Some(4) {
             if let Some(id) = entity_id {
-                out.push((id, gadget_id.unwrap_or(0)));
+                out.push((
+                    id,
+                    config_id.unwrap_or(0),
+                    gadget_id.unwrap_or(0),
+                ));
             }
         }
     }
     out
+}
+
+/// WorldChestOpenNotify (28616): `{2: scene_id, 11: config_id, 12:
+/// group_id}` — fires the moment a world chest actually opens (unlike
+/// the F-press interact, which can precede the loot by minutes on
+/// locked chests). The config_id is scene-local — resolve the gadget
+/// family id through the config registry for tier labeling.
+pub fn detect_world_chest_config(cmd: &GameCommand) -> Option<u64> {
+    if cmd.command_id != 28616 {
+        return None;
+    }
+    let fields = parse(&cmd.proto_data)?;
+    let mut config_id = None;
+    for (f, v) in &fields {
+        if *f == 11 {
+            config_id = v.as_varint();
+        }
+    }
+    config_id
 }
 
 /// GadgetInteractRsp (881): `{3: gadget_id, 11: interact_type, 15:
