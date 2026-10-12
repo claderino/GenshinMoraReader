@@ -286,6 +286,12 @@ struct MoraApp {
     show_settings: bool,
     /// Reason labels available for mapping (from current rows).
     mappable_reasons: Vec<String>,
+    /// Per-view CSV export markers (view key → newest exported ts_ms):
+    /// after an export, the table can show only newer events.
+    export_markers: std::collections::HashMap<String, i64>,
+    /// When true, rows are filtered to events newer than the last
+    /// export marker for the current view.
+    since_export: bool,
 
     balance: Option<i64>,
     decrypting: bool,
@@ -316,6 +322,8 @@ impl MoraApp {
             export_config: ledger::ExportConfig::load(&ledger_dir),
             show_settings: false,
             mappable_reasons: Vec::new(),
+            export_markers: Self::load_export_markers(&ledger_dir),
+            since_export: true,
             balance: None,
             decrypting: false,
             status: "Starting…".into(),
@@ -332,6 +340,54 @@ impl MoraApp {
         match uid {
             Some(uid) => self.ledger_dir.join(format!("mora_{uid}.jsonl")),
             None => self.ledger_path.clone(),
+        }
+    }
+
+    /// Key identifying the current view in the export markers
+    /// ("all" or the active uid).
+    fn view_key(&self) -> String {
+        match (self.view_all, self.active_uid) {
+            (false, Some(uid)) => uid.to_string(),
+            _ => "all".into(),
+        }
+    }
+
+    fn markers_path() -> std::path::PathBuf {
+        // beside the ledger files
+        std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+            .join("GenshinReader")
+            .join("export_markers.json")
+    }
+
+    fn load_export_markers(
+        dir: &std::path::Path,
+    ) -> std::collections::HashMap<String, i64> {
+        // Prefer the marker file beside the ledger dir (portable);
+        // fall back to LOCALAPPDATA.
+        let beside = dir.join("export_markers.json");
+        let path = if beside.exists() {
+            beside
+        } else {
+            Self::markers_path()
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Default::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    fn save_export_markers(&self) {
+        let beside = self.ledger_dir.join("export_markers.json");
+        let path = if beside.parent().map(|p| p.exists()).unwrap_or(false)
+        {
+            beside
+        } else {
+            Self::markers_path()
+        };
+        if let Ok(json) = serde_json::to_string(&self.export_markers) {
+            let _ = std::fs::write(path, json);
         }
     }
 
@@ -358,7 +414,16 @@ impl MoraApp {
     }
 
     fn refresh(&mut self) {
-        self.rows = ledger::dedupe(&self.events);
+        let mut rows = ledger::dedupe(&self.events);
+        // "Since last export" filter: only events strictly newer than
+        // the newest row the last CSV export covered for this view.
+        if self.since_export {
+            let key = self.view_key();
+            if let Some(&marker) = self.export_markers.get(&key) {
+                rows.retain(|r| r.ts_ms > marker);
+            }
+        }
+        self.rows = rows;
         self.earned = self.rows.iter().filter(|r| r.amount > 0).map(|r| r.amount).sum();
         self.spent = self.rows.iter().filter(|r| r.amount < 0).map(|r| -r.amount).sum();
 
@@ -426,7 +491,23 @@ impl MoraApp {
         let mut path = self.ledger_dir.clone();
         path.push(format!("mora-{uid_part}{stamp}.csv"));
         match ledger::write_csv(&self.rows, &path, &self.export_config) {
-            Ok(()) => self.toast = Some(format!("Exported {}", path.display())),
+            Ok(()) => {
+                // Record the export marker: everything in self.rows is
+                // now exported — future views (with the since-export
+                // filter on) start after the newest exported row.
+                if let Some(newest) =
+                    self.rows.iter().map(|r| r.ts_ms).max()
+                {
+                    let key = self.view_key();
+                    let prev = self.export_markers.get(&key).copied();
+                    if prev.is_none_or(|p| newest > p) {
+                        self.export_markers.insert(key, newest);
+                        self.save_export_markers();
+                    }
+                }
+                self.toast =
+                    Some(format!("Exported {}", path.display()));
+            }
             Err(e) => self.toast = Some(format!("Export failed: {e}")),
         }
     }
@@ -676,6 +757,19 @@ impl eframe::App for MoraApp {
                 }
                 if ui.button("💾 Export CSV").clicked() {
                     self.export_csv();
+                }
+                // Since-last-export filter: on by default after the
+                // first export; toggling off shows the full day again.
+                let has_marker = self
+                    .export_markers
+                    .contains_key(&self.view_key());
+                if has_marker {
+                    if ui
+                        .checkbox(&mut self.since_export, "🆕 Since last export")
+                        .changed()
+                    {
+                        self.refresh();
+                    }
                 }
                 if ui.button("⚙ Export settings").clicked() {
                     self.show_settings = true;
