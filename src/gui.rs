@@ -16,6 +16,7 @@ use protobuf::Message;
 
 use crate::capture;
 use crate::detect;
+use crate::detect::MoraEvent;
 use crate::ledger::{self, ExportConfig, LedgerEvent};
 
 #[derive(Debug)]
@@ -123,6 +124,13 @@ fn worker_main(ledger_path: PathBuf, tx: Sender<WorkerMsg>) -> Result<()> {
         // token's account id is NOT used for file naming: one account spans
         // multiple regions, each with its own UID.
         let mut uid_votes: std::collections::HashMap<u32, u32> = Default::default();
+        // Gadget id tracking for chest-tier resolution (see the command
+        // loop below).
+        let mut gadget_ids: std::collections::HashMap<u64, u64> =
+            Default::default();
+        let mut config_ids: std::collections::HashMap<u64, u64> =
+            Default::default();
+        let mut last_chest_gadget: Option<(u64, std::time::Instant)> = None;
         let mut uid_locked = false;
 
         // Watchdog state: if a login handshake was seen but no commands
@@ -223,7 +231,93 @@ fn worker_main(ledger_path: PathBuf, tx: Sender<WorkerMsg>) -> Result<()> {
                             );
                         }
 
-                        for event in detect::detect_mora_events(command) {
+                        // Gadget id tracking for chest-tier resolution:
+                        // entity id and scene-local config id → gadget
+                        // family id (27685 appears), plus the interact /
+                        // world-chest-open signals that correlate with
+                        // chest ItemAdds to resolve the exact tier.
+                        for (eid, cfg, gid) in
+                            detect::detect_gadget_ids(command)
+                        {
+                            gadget_ids.insert(eid, gid);
+                            if cfg != 0 {
+                                config_ids.insert(cfg, gid);
+                            }
+                        }
+                        if gadget_ids.len() > 65_536 {
+                            gadget_ids.clear();
+                            config_ids.clear();
+                        }
+                        if let Some((_entity, ity)) =
+                            detect::detect_gadget_interact_entity(command)
+                        {
+                            // Only chest-family interacts (3 =
+                            // OPEN_CHEST, 8 = GENERAL_REWARD) —
+                            // PICK_ITEM/GATHER noise must not drive the
+                            // tier correlation.
+                            if matches!(ity, 3 | 8) {
+                                if let Some(gid) =
+                                    gadget_ids.get(&_entity).copied()
+                                {
+                                    last_chest_gadget = Some((
+                                        gid,
+                                        std::time::Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+                        // WorldChestOpenNotify: the authoritative
+                        // chest-open moment — resolves locked chests
+                        // whose F-press interact happened long before
+                        // the loot landed.
+                        if let Some(cfg) =
+                            detect::detect_world_chest_config(command)
+                        {
+                            if let Some(gid) =
+                                config_ids.get(&cfg).copied()
+                            {
+                                tracing::info!(
+                                    gadget_id = gid,
+                                    "world chest open resolved"
+                                );
+                                last_chest_gadget = Some((
+                                    gid,
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
+
+                        for mut event in detect::detect_mora_events(command) {
+                            // Attach the recent gadget id to chest-family
+                            // ItemAdds for tier labeling.
+                            if let MoraEvent::ItemAdd {
+                                action_reason: Some(r),
+                                ref mut gadget_id,
+                                ..
+                            } = event
+                            {
+                                if matches!(r, 39) {
+                                    if let Some((gid, t)) =
+                                        last_chest_gadget
+                                    {
+                                        if t.elapsed()
+                                            < std::time::Duration::from_millis(
+                                                8000,
+                                            )
+                                        {
+                                            *gadget_id = Some(gid);
+                                            tracing::info!(
+                                                gadget_id = gid,
+                                                age_ms = t
+                                                    .elapsed()
+                                                    .as_millis()
+                                                    as u64,
+                                                "chest tier resolved"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             let row = ledger.record(&event);
                             let _ = tx.send(WorkerMsg::Event(row));
                         }
