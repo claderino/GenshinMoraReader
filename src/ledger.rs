@@ -31,6 +31,11 @@ pub struct LedgerEvent {
     /// Raw reason enum value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_raw: Option<u32>,
+    /// Interacting gadget's config id (chest-tier resolution; see
+    /// resolve_chest_label — labels are applied at display time so
+    /// user overrides apply retroactively).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gadget_id: Option<u64>,
     /// Account UID this event belongs to (from PacketHead.user_id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
@@ -127,6 +132,7 @@ impl Ledger {
             balance: self.balance,
             reason: None,
             reason_raw: None,
+            gadget_id: None,
             uid: self.uid,
             command_id: 0,
         });
@@ -135,7 +141,7 @@ impl Ledger {
     /// Record a detected event. Returns the persisted row.
     pub fn record(&mut self, event: &MoraEvent) -> LedgerEvent {
         let now = Local::now();
-        let (kind, amount, reason, reason_raw) = match event {
+        let (kind, amount, reason, reason_raw, gadget_id) = match event {
             MoraEvent::PropChange { old, new, prop_reason, .. } => {
                 let amount = (new - old).round() as i64;
                 // Keep our tracked balance anchored to the server's numbers.
@@ -146,21 +152,24 @@ impl Ledger {
                     prop_reason
                         .map(|r| crate::reasons::prop_change_reason_name(r).unwrap_or("Unknown").to_string()),
                     *prop_reason,
+                    None,
                 )
             }
             MoraEvent::ItemAdd { count, action_reason, gadget_id, .. } => (
                 "item_add".to_string(),
                 Some(*count as i64),
-                action_reason.map(|r| {
-                    crate::reasons::action_reason_label_tiered(r, *gadget_id)
-                }),
+                // Plain label — tier/override labels resolve at display
+                // time (resolve_chest_label) so user gadget mappings
+                // apply retroactively to stored rows.
+                action_reason.map(crate::reasons::action_reason_label),
                 *action_reason,
+                *gadget_id,
             ),
             MoraEvent::Balance { balance, .. } => {
                 let new_balance = balance.round() as i64;
                 let amount = self.balance.map(|old| new_balance - old);
                 self.balance = Some(new_balance);
-                ("balance".to_string(), amount, None, None)
+                ("balance".to_string(), amount, None, None, None)
             }
         };
 
@@ -172,6 +181,7 @@ impl Ledger {
             balance: self.balance,
             reason,
             reason_raw,
+            gadget_id,
             uid: self.uid,
             command_id: event.command_id(),
         };
@@ -285,6 +295,9 @@ pub struct SummaryRow {
     pub source: &'static str,
     pub balance: Option<i64>,
     pub uid: Option<u32>,
+    /// Chest gadget config id — resolved to a tier/override label at
+    /// display time (see resolve_chest_label).
+    pub gadget_id: Option<u64>,
 }
 
 fn ts_to_ms(ts: &str) -> i64 {
@@ -345,6 +358,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
         reason: String,
         balance: Option<i64>,
         uid: Option<u32>,
+        gadget_id: Option<u64>,
     }
     struct ItemAdd {
         ts_ms: i64,
@@ -352,6 +366,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
         reason: String,
         balance: Option<i64>,
         uid: Option<u32>,
+        gadget_id: Option<u64>,
     }
 
     let prop_changes: Vec<PropItem> = events
@@ -367,6 +382,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
                 .unwrap_or_else(|| "unknown".into()),
             balance: e.balance,
             uid: e.uid,
+            gadget_id: e.gadget_id,
         })
         .collect();
 
@@ -379,6 +395,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
             reason: e.reason.clone().unwrap_or_else(|| "unknown".into()),
             balance: e.balance,
             uid: e.uid,
+            gadget_id: e.gadget_id,
         })
         .collect();
 
@@ -388,10 +405,12 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
     for p in &prop_changes {
         // Pair with a matching item-add for a richer reason label.
         let mut reason = p.reason.clone();
+        let mut gadget_id = p.gadget_id;
         for (i, it) in item_adds.iter().enumerate() {
             if !consumed[i] && it.amount == p.amount && (it.ts_ms - p.ts_ms).abs() <= 5_000 {
                 consumed[i] = true;
                 reason = it.reason.clone();
+                gadget_id = it.gadget_id.or(gadget_id);
                 break;
             }
         }
@@ -403,6 +422,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
             source: "prop",
             balance: p.balance,
             uid: p.uid,
+            gadget_id,
         });
     }
 
@@ -418,6 +438,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
             source: "item",
             balance: it.balance,
             uid: it.uid,
+            gadget_id: it.gadget_id,
         });
     }
 
@@ -443,6 +464,7 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
             source: "sync",
             balance: e.balance,
             uid: e.uid,
+            gadget_id: e.gadget_id,
         });
     }
 
@@ -527,6 +549,11 @@ pub struct ExportConfig {
     /// Edited in the GUI table; exported via the `description` column.
     #[serde(default)]
     pub descriptions: std::collections::BTreeMap<String, String>,
+    /// User-entered gadget-id → label overrides (e.g. "70600065" →
+    /// "Snezhnaya Mora chest"). Takes priority over the built-in
+    /// chest-tier table; edited in the GUI settings.
+    #[serde(default)]
+    pub gadget_labels: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ExportConfig {
@@ -540,8 +567,25 @@ impl Default for ExportConfig {
                 .collect(),
             include_header: true,
             descriptions: Default::default(),
+            gadget_labels: Default::default(),
         }
     }
+}
+
+/// Resolve a chest gadget id to its label: user overrides first
+/// (ExportConfig.gadget_labels), then the built-in tier table
+/// (reasons::chest_label).
+pub fn resolve_chest_label(
+    gadget_id: u64,
+    config: &ExportConfig,
+) -> Option<String> {
+    if let Some(custom) = config.gadget_labels.get(&gadget_id.to_string())
+    {
+        if !custom.trim().is_empty() {
+            return Some(custom.clone());
+        }
+    }
+    crate::reasons::chest_label(gadget_id).map(|s| s.to_string())
 }
 
 /// Stable per-row description key: `"{uid}:{ts_ms}"`.

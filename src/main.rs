@@ -475,7 +475,22 @@ fn run_summary(
     };
 
     let events = ledger::load_events(&ledger_path, filter)?;
-    let rows = ledger::dedupe(&events);
+    let mut rows = ledger::dedupe(&events);
+    // Live chest-label resolution (same as the GUI): user gadget
+    // mappings override the built-in tier table, retroactively.
+    let config = ledger::ExportConfig::load(
+        &ledger_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default(),
+    );
+    for row in rows.iter_mut() {
+        if let Some(gid) = row.gadget_id {
+            if let Some(label) = ledger::resolve_chest_label(gid, &config) {
+                row.reason = label;
+            }
+        }
+    }
     let config = ledger::ExportConfig::load(
         ledger_path
             .parent()

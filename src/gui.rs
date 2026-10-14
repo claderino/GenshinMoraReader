@@ -512,6 +512,18 @@ impl MoraApp {
 
     fn refresh(&mut self) {
         let mut rows = ledger::dedupe(&self.events);
+        // Live chest-label resolution: user gadget mappings (settings)
+        // override the built-in table and apply retroactively —
+        // stored rows keep the plain label; presentation resolves.
+        for row in rows.iter_mut() {
+            if let Some(gid) = row.gadget_id {
+                if let Some(label) =
+                    ledger::resolve_chest_label(gid, &self.export_config)
+                {
+                    row.reason = label;
+                }
+            }
+        }
         // "Since last export" filter: only events strictly newer than
         // the newest row the last CSV export covered for this view.
         if self.since_export {
@@ -724,6 +736,92 @@ impl MoraApp {
                     });
                     if ui.button("Map all unmapped to…").clicked() {
                         // no-op placeholder; label mapping via Add label
+                    }
+                });
+                ui.add_space(6.0);
+
+                ui.heading("Gadget labels");
+                ui.small("Chest gadget id → label (overrides the built-in tier table; applies to past rows too)");
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        let mut remove: Option<String> = None;
+                        for (id, label) in
+                            self.export_config.gadget_labels.clone()
+                        {
+                            ui.horizontal(|ui| {
+                                ui.monospace(&id);
+                                ui.label("→");
+                                let mut label = label;
+                                ui.text_edit_singleline(&mut label);
+                                if ui.button("✖").clicked() {
+                                    remove = Some(id.clone());
+                                }
+                                self.export_config
+                                    .gadget_labels
+                                    .insert(id.clone(), label);
+                            });
+                        }
+                        if let Some(id) = remove {
+                            self.export_config.gadget_labels.remove(&id);
+                            self.refresh();
+                        }
+                    });
+                // Recently seen gadget ids without any label (from the
+                // loaded rows) — one click adds a pre-filled entry.
+                let unlabeled: Vec<u64> = {
+                    let mut seen =
+                        std::collections::BTreeSet::new();
+                    for r in &self.rows {
+                        if let Some(gid) = r.gadget_id {
+                            if !self
+                                .export_config
+                                .gadget_labels
+                                .contains_key(&gid.to_string())
+                                && ledger::resolve_chest_label(
+                                    gid,
+                                    &self.export_config,
+                                )
+                                .is_none()
+                            {
+                                seen.insert(gid);
+                            }
+                        }
+                    }
+                    seen.into_iter().collect()
+                };
+                ui.horizontal(|ui| {
+                    if !unlabeled.is_empty() {
+                        ui.label("Unlabeled seen:");
+                        for gid in unlabeled {
+                            if ui
+                                .button(format!("＋ {gid}"))
+                                .on_hover_text(
+                                    "map this gadget id",
+                                )
+                                .clicked()
+                            {
+                                self.export_config.gadget_labels.insert(
+                                    gid.to_string(),
+                                    String::new(),
+                                );
+                            }
+                        }
+                    } else {
+                        ui.weak("(no unlabeled gadget ids in view)");
+                    }
+                    let mut new_id = String::new();
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut new_id)
+                            .hint_text("gadget id…"),
+                    );
+                    if resp.lost_focus()
+                        && new_id.trim().parse::<u64>().is_ok()
+                    {
+                        self.export_config.gadget_labels.insert(
+                            new_id.trim().to_string(),
+                            String::new(),
+                        );
                     }
                 });
                 ui.add_space(6.0);
