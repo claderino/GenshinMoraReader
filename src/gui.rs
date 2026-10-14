@@ -634,9 +634,24 @@ impl MoraApp {
         egui::Window::new("⚙ Export settings")
             .open(&mut stay_open)
             .resizable(true)
-            .default_width(520.0)
+            .default_size((560.0, 640.0))
             .show(ctx, |ui| {
-                ui.heading("Timestamp format");
+                // One outer scroll for the whole window body — the
+                // window clamps to the screen, and with many gadget
+                // labels the fixed sections (preview, save) must stay
+                // reachable.
+                egui::ScrollArea::vertical()
+                    .id_source("settings_outer")
+                    .show(ui, |ui| {
+                        self.settings_content(ui);
+                    });
+            });
+        self.show_settings = stay_open;
+    }
+
+    fn settings_content(&mut self, ui: &mut egui::Ui) {
+        {
+            ui.heading("Timestamp format");
                 ui.horizontal(|ui| {
                     ui.label("Format:");
                     ui.text_edit_singleline(&mut self.export_config.datetime_format);
@@ -847,8 +862,7 @@ impl MoraApp {
                         self.export_config = ExportConfig::default();
                     }
                 });
-            });
-        self.show_settings = stay_open;
+        }
     }
 }
 
