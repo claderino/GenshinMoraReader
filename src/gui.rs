@@ -710,28 +710,28 @@ impl MoraApp {
 
                 ui.heading("Reason mappings");
                 ui.small("Exported type ← tracker label (empty = passthrough)");
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        let mut remove: Option<String> = None;
-                        for (label, value) in self.export_config.reason_map.clone() {
-                            ui.horizontal(|ui| {
-                                ui.label(&label);
-                                ui.label("→");
-                                let mut value = value;
-                                ui.text_edit_singleline(&mut value);
-                                if ui.button("✖").clicked() {
-                                    remove = Some(label.clone());
-                                }
-                                self.export_config
-                                    .reason_map
-                                    .insert(label.clone(), value);
-                            });
-                        }
-                        if let Some(label) = remove {
-                            self.export_config.reason_map.remove(&label);
-                        }
-                    });
+                // No inner scroll cap — nested ScrollAreas don't chain
+                // reliably; the single outer window scroll handles it.
+                {
+                    let mut remove: Option<String> = None;
+                    for (label, value) in self.export_config.reason_map.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(&label);
+                            ui.label("→");
+                            let mut value = value;
+                            ui.text_edit_singleline(&mut value);
+                            if ui.button("✖").clicked() {
+                                remove = Some(label.clone());
+                            }
+                            self.export_config
+                                .reason_map
+                                .insert(label.clone(), value);
+                        });
+                    }
+                    if let Some(label) = remove {
+                        self.export_config.reason_map.remove(&label);
+                    }
+                }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.menu_button("＋ Add label…", |ui| {
@@ -757,31 +757,30 @@ impl MoraApp {
 
                 ui.heading("Gadget labels");
                 ui.small("Chest gadget id → label (overrides the built-in tier table; applies to past rows too)");
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        let mut remove: Option<String> = None;
-                        for (id, label) in
-                            self.export_config.gadget_labels.clone()
-                        {
-                            ui.horizontal(|ui| {
-                                ui.monospace(&id);
-                                ui.label("→");
-                                let mut label = label;
-                                ui.text_edit_singleline(&mut label);
-                                if ui.button("✖").clicked() {
-                                    remove = Some(id.clone());
-                                }
-                                self.export_config
-                                    .gadget_labels
-                                    .insert(id.clone(), label);
-                            });
-                        }
-                        if let Some(id) = remove {
-                            self.export_config.gadget_labels.remove(&id);
-                            self.refresh();
-                        }
-                    });
+                // No inner scroll cap — the outer window scroll handles it.
+                {
+                    let mut remove: Option<String> = None;
+                    for (id, label) in
+                        self.export_config.gadget_labels.clone()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.monospace(&id);
+                            ui.label("→");
+                            let mut label = label;
+                            ui.text_edit_singleline(&mut label);
+                            if ui.button("✖").clicked() {
+                                remove = Some(id.clone());
+                            }
+                            self.export_config
+                                .gadget_labels
+                                .insert(id.clone(), label);
+                        });
+                    }
+                    if let Some(id) = remove {
+                        self.export_config.gadget_labels.remove(&id);
+                        self.refresh();
+                    }
+                }
                 // Recently seen gadget ids without any label (from the
                 // loaded rows) — one click adds a pre-filled entry.
                 let unlabeled: Vec<u64> = {
