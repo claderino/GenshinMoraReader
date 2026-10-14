@@ -409,7 +409,17 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
         for (i, it) in item_adds.iter().enumerate() {
             if !consumed[i] && it.amount == p.amount && (it.ts_ms - p.ts_ms).abs() <= 5_000 {
                 consumed[i] = true;
-                reason = it.reason.clone();
+                // Prefer the item-add's action reason — UNLESS it is
+                // unknown and the prop-change carries a real one.
+                if it.reason != "unknown" {
+                    reason = it.reason.clone();
+                } else if let Some(raw) =
+                    p.reason.strip_prefix("PropChange:")
+                {
+                    if raw != "unknown" {
+                        reason = raw.to_string();
+                    }
+                }
                 gadget_id = it.gadget_id.or(gadget_id);
                 break;
             }
@@ -469,6 +479,23 @@ pub fn dedupe(events: &[LedgerEvent]) -> Vec<SummaryRow> {
     }
 
     rows.sort_by_key(|r| r.ts_ms);
+
+    // Drop duplicate-accounting rows: a row whose post-event balance
+    // EQUALS the previous row's balance recorded no real change — it's
+    // the same gain arriving through a second packet (e.g. an item-add
+    // with an unrecognized reason after the authoritative prop-change).
+    // Rows without balance info are always kept.
+    let mut last_balance: Option<i64> = None;
+    rows.retain(|r| {
+        let keep = match (r.balance, last_balance) {
+            (Some(b), Some(prev)) => b != prev,
+            _ => true,
+        };
+        if let Some(b) = r.balance {
+            last_balance = Some(b);
+        }
+        keep
+    });
     rows
 }
 
@@ -714,5 +741,58 @@ fn csv_escape(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(kind: &str, ts: &str, amount: i64, reason: Option<&str>, balance: Option<i64>) -> LedgerEvent {
+        LedgerEvent {
+            ts: ts.to_string(),
+            session: "s".into(),
+            kind: kind.into(),
+            amount: Some(amount),
+            balance,
+            reason: reason.map(|r| r.to_string()),
+            reason_raw: None,
+            gadget_id: None,
+            uid: Some(1),
+            command_id: 0,
+        }
+    }
+
+    /// A duplicate-accounting row (same post-balance as the previous
+    /// row) is dropped; real changes are kept even when the label is
+    /// unknown. Pairing prefers a known reason over an "unknown"
+    /// item-add label.
+    #[test]
+    fn drops_stale_balance_duplicates() {
+        let events = vec![
+            ev("prop_change", "2026-10-14T10:00:00+03:00", 5, Some("Chest"), Some(10)),
+            ev("item_add", "2026-10-14T10:00:01+03:00", 5, None, Some(10)),
+            ev("item_add", "2026-10-14T10:00:02+03:00", 5, None, Some(10)),
+            ev("prop_change", "2026-10-14T10:05:00+03:00", 3, None, Some(13)),
+            ev("prop_change", "2026-10-14T10:06:00+03:00", -2, Some("Buy Resin"), Some(11)),
+        ];
+        let rows = dedupe(&events);
+        // Row 1 pairs the +5 prop with an item-add: reason "Chest"
+        // survives (unknown item label loses to the known prop label),
+        // balance 5→10 — kept. Row 2 (stray +5 item-add, balance stays
+        // 10) is DROPPED. The unknown +3 (balance 10→13) is KEPT, and
+        // the spend (13→11) is kept (unpaired props keep their
+        // PropChange: prefix).
+        assert_eq!(rows.len(), 3, "rows: {rows:?}");
+        assert!(rows.iter().any(|r| r.reason == "Chest"),
+            "paired row should keep the known reason");
+        assert!(rows.iter().any(|r| r.reason == "PropChange:Buy Resin"));
+        assert!(rows.iter().any(|r| r.balance == Some(13)),
+            "unknown reason but real balance change must be kept");
+        assert_eq!(
+            rows.iter().filter(|r| r.amount == 5).count(),
+            1,
+            "duplicate +5 row should be gone: {rows:?}"
+        );
     }
 }
